@@ -393,11 +393,11 @@ where
             self.decr_active();
             e
         })?;
-        return Ok(IdleConn {
+        Ok(IdleConn {
             conn,
             last_visited: Instant::now(),
             created: Instant::now(),
-        });
+        })
     }
 
     fn put(&mut self, mut conn: IdleConn<M::Connection>) {
