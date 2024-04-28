@@ -304,7 +304,8 @@ where
                                 self.push_back(conn);
                                 continue;
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                log::trace!("conn check fail: {}", e);
                                 self.decr_active();
                             }
                         }
@@ -321,10 +322,7 @@ where
         max_size > 0 && self.interval().active > max_size
     }
 
-    /// Retrieves a connection from the pool.
-    ///
-    /// Waits for at most the connection timeout before returning an error.
-    pub async fn get_timeout(
+    async fn new_connection(
         &self,
         connection_timeout: Option<Duration>,
     ) -> io::Result<M::Connection> {
@@ -353,11 +351,37 @@ where
     /// Waits for at most the configured connection timeout before returning an
     /// error.
     pub async fn get(&self) -> io::Result<Connection<M>> {
-        if let Some(conn) = self.pop_front() {
-            return Ok(Connection {
-                conn: Some(conn),
-                pool: self.clone(),
-            });
+        self.get_timeout(self.0.connection_timeout).await
+    }
+
+    /// Retrieves a connection from the pool.
+    ///
+    /// Waits for at most the connection timeout before returning an error.
+    pub async fn get_timeout(
+        &self,
+        connection_timeout: Option<Duration>,
+    ) -> io::Result<Connection<M>> {
+        let conn = self.get_inner(connection_timeout).await?;
+        Ok(Connection {
+            conn: Some(conn),
+            pool: self.clone(),
+        })
+    }
+
+    async fn get_inner(
+        &self,
+        connection_timeout: Option<Duration>,
+    ) -> io::Result<IdleConn<M::Connection>> {
+        while let Some(mut conn) = self.pop_front() {
+            match self.0.manager.check(&mut conn.conn).await {
+                Ok(()) => {
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    log::trace!("conn check fail: {}", e);
+                    continue;
+                }
+            }
         }
 
         self.incr_active();
@@ -365,23 +389,15 @@ where
             self.decr_active();
             return Err(other("exceed limit"));
         }
-
-        let conn = self
-            .get_timeout(self.0.connection_timeout)
-            .await
-            .map_err(|e| {
-                self.decr_active();
-                e
-            })?;
-
-        Ok(Connection {
-            conn: Some(IdleConn {
-                conn,
-                last_visited: Instant::now(),
-                created: Instant::now(),
-            }),
-            pool: self.clone(),
-        })
+        let conn = self.new_connection(connection_timeout).await.map_err(|e| {
+            self.decr_active();
+            e
+        })?;
+        return Ok(IdleConn {
+            conn,
+            last_visited: Instant::now(),
+            created: Instant::now(),
+        });
     }
 
     fn put(&mut self, mut conn: IdleConn<M::Connection>) {
