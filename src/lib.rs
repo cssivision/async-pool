@@ -189,8 +189,8 @@ where
     M: ManageConnection,
 {
     fn drop(&mut self) {
-        if self.conn.is_some() {
-            self.pool.put(self.conn.take().unwrap());
+        if let Some(conn) = self.conn.take() {
+            self.pool.put(conn);
         }
     }
 }
