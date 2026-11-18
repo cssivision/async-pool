@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::ops::{Add, Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use awak::time::{delay_for, timeout};
@@ -170,7 +170,7 @@ where
         };
 
         let pool = Pool(Arc::new(shared));
-        awak::spawn(pool.clone().check()).detach();
+        awak::spawn(Pool::check(Arc::downgrade(&pool.0))).detach();
         pool
     }
 }
@@ -263,7 +263,7 @@ where
         self.interval().conns.pop_front()
     }
 
-    fn push_back(&mut self, conn: IdleConn<M::Connection>) {
+    fn push_back(&self, conn: IdleConn<M::Connection>) {
         self.interval().conns.push_back(conn);
     }
 
@@ -288,30 +288,33 @@ where
         false
     }
 
-    async fn check(mut self) {
-        if let Some(interval) = self.0.check_interval {
+    async fn check(pool: Weak<SharedPool<M>>) {
+        if let Some(interval) = pool.upgrade().and_then(|pool| pool.check_interval) {
             loop {
                 delay_for(interval).await;
-                let n = self.idle_count();
+
+                let Some(shared) = pool.upgrade() else {
+                    break;
+                };
+                let pool = Pool(shared);
+                let n = pool.idle_count();
                 for _ in 0..n {
-                    if let Some(mut conn) = self.pop_front() {
-                        if self.exceed_idle_timeout(&conn) || self.exceed_max_lifetime(&conn) {
-                            self.decr_active();
-                            continue;
-                        }
-                        match self.0.manager.check(&mut conn.conn).await {
-                            Ok(_) => {
-                                self.push_back(conn);
-                                continue;
-                            }
-                            Err(e) => {
-                                log::trace!("conn check fail: {}", e);
-                                self.decr_active();
-                            }
-                        }
+                    let Some(mut conn) = pool.pop_front() else {
+                        break;
+                    };
+
+                    if pool.exceed_idle_timeout(&conn) || pool.exceed_max_lifetime(&conn) {
+                        pool.decr_active();
                         continue;
                     }
-                    break;
+
+                    match pool.0.manager.check(&mut conn.conn).await {
+                        Ok(()) => pool.push_back(conn),
+                        Err(e) => {
+                            log::trace!("conn check fail: {}", e);
+                            pool.decr_active();
+                        }
+                    }
                 }
             }
         }
@@ -428,4 +431,35 @@ struct IdleConn<C> {
 struct PoolInternals<C> {
     conns: LinkedList<IdleConn<C>>,
     active: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestManager;
+
+    impl ManageConnection for TestManager {
+        type Connection = ();
+
+        async fn connect(&self) -> io::Result<Self::Connection> {
+            Ok(())
+        }
+
+        async fn check(&self, _: &mut Self::Connection) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn background_check_does_not_keep_pool_alive() {
+        let pool = Pool::builder()
+            .check_interval(Some(Duration::from_millis(1)))
+            .build(TestManager);
+        let weak = Arc::downgrade(&pool.0);
+
+        drop(pool);
+
+        assert!(weak.upgrade().is_none());
+    }
 }

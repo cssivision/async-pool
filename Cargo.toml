@@ -4,11 +4,10 @@ version = "0.1.0"
 authors = ["cssivision <cssivision@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/cssivision/async-pool"
-homepage = "https://github.com/cssivision/async-pool"
 description = "async pool base on awak"
 edition = "2021"
 
 [dependencies]
 trait-variant = "0.1.2"
-awak = "0.2"
+awak = "0.2.45"
 log = "0.4"
