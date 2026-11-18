@@ -24,10 +24,6 @@ pub trait LocalManageConnection: Send + Sync + 'static {
     async fn check(&self, conn: &mut Self::Connection) -> io::Result<()>;
 }
 
-fn other(msg: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, msg)
-}
-
 /// A builder for a connection pool.
 pub struct Builder<M>
 where
@@ -334,11 +330,11 @@ where
                 Ok(s) => match s {
                     Ok(s) => s,
                     Err(e) => {
-                        return Err(other(&e.to_string()));
+                        return Err(io::Error::other(e));
                     }
                 },
                 Err(e) => {
-                    return Err(other(&e.to_string()));
+                    return Err(io::Error::other(e));
                 }
             };
 
@@ -390,12 +386,12 @@ where
         self.incr_active();
         if self.exceed_limit() {
             self.decr_active();
-            return Err(other("exceed limit"));
+            return Err(io::Error::other("exceed limit"));
         }
-        let conn = self.new_connection(connection_timeout).await.map_err(|e| {
-            self.decr_active();
-            e
-        })?;
+        let conn = self
+            .new_connection(connection_timeout)
+            .await
+            .inspect_err(|_| self.decr_active())?;
         Ok(IdleConn {
             conn,
             last_visited: Instant::now(),
